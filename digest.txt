@@ -1,0 +1,184 @@
+Directory structure:
+└── AI Debugging Agent/
+    └── Backend/
+        ├── requirements.txt
+        └── app/
+            ├── main.py
+            ├── agents/
+            │   └── error_analyzer.py
+            ├── api/
+            │   └── routes.py
+            ├── core/
+            │   └── config.py
+            └── graph/
+                └── workflow.py
+
+================================================
+FILE: Backend/requirements.txt
+================================================
+fastapi
+uvicorn
+langchain
+langgraph
+langchain-google-genai
+faiss-cpu
+python-dotenv
+pydantic
+
+
+================================================
+FILE: Backend/app/main.py
+================================================
+from fastapi import FastAPI
+from app.api.routes import router 
+
+app = FastAPI(title="AI Debugging Agent")
+
+app.include_router(router)
+
+@app.get("/")
+def home():
+    return("Everthing is working...")
+
+
+================================================
+FILE: Backend/app/agents/error_analyzer.py
+================================================
+from langchain_google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    google_api_key=os.getenv("GOOGLE_API_KEY")
+)
+
+def analyze_error(error: str, code: str):
+    prompt = f"""
+    You are a debugging expert.
+
+    Error:
+    {error}
+
+    Code:
+    {code}
+
+    Explain the root cause of this error clearly.
+    """
+
+    response = llm.invoke(prompt)
+
+    # âœ… Return only text
+    return response.content
+
+
+================================================
+FILE: Backend/app/api/routes.py
+================================================
+from fastapi import APIRouter
+from pydantic import BaseModel
+from app.graph.workflow import build_graph
+from app.agents.error_analyzer import analyze_error
+
+router = APIRouter()
+
+# Build graph once
+graph = build_graph(analyze_error)
+
+
+class DebugRequest(BaseModel):
+    error: str
+    code: str
+
+
+@router.post("/debug")
+def debug_error(request: DebugRequest):
+    try:
+        result = graph.invoke({
+            "error": request.error,
+            "code": request.code
+        })
+
+        return {
+            "success": True,
+            "data": result
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+================================================
+FILE: Backend/app/core/config.py
+================================================
+import  os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+
+================================================
+FILE: Backend/app/graph/workflow.py
+================================================
+from typing import TypedDict
+from langgraph.graph import StateGraph
+
+# âœ… Strongly typed state (VERY IMPORTANT)
+class DebugState(TypedDict):
+    error: str
+    code: str
+    analysis: str
+
+
+def build_graph(analyze_fn):
+
+    # Create graph
+    graph = StateGraph(DebugState)
+
+    # âœ… Node function
+    def analyze_node(state: DebugState):
+        print("Incoming State:", state)  # Debug log
+
+        # Safe extraction (prevents KeyError)
+        error = state.get("error", "")
+        code = state.get("code", "")
+
+        if not error or not code:
+            return {
+                "error": error,
+                "code": code,
+                "analysis": "Error or code not provided properly."
+            }
+
+        # Call your agent function
+        result = analyze_fn(error, code)
+
+        # Ensure clean string output
+        if hasattr(result, "content"):
+            analysis_text = result.content
+        else:
+            analysis_text = str(result)
+
+        # Return FULL state (important for LangGraph)
+        return {
+            "error": error,
+            "code": code,
+            "analysis": analysis_text
+        }
+
+    # Add node
+    graph.add_node("analyze", analyze_node)
+
+    # Set entry point
+    graph.set_entry_point("analyze")
+
+    # Compile graph
+    return graph.compile()
+

@@ -1,0 +1,534 @@
+Directory structure:
+└── Backend/
+    ├── ingest_test.py
+    ├── requirements.txt
+    ├── test.py
+    ├── uploaded_repo.zip
+    └── app/
+        ├── main.py
+        ├── agents/
+        │   ├── error_analyzer.py
+        │   ├── fix_generator.py
+        │   └── retriever.py
+        ├── api/
+        │   ├── routes.py
+        │   └── upload.py
+        ├── core/
+        │   └── config.py
+        ├── graph/
+        │   └── workflow.py
+        ├── services/
+        │   ├── chunker.py
+        │   ├── embedding_service.py
+        │   ├── ingestion.py
+        │   ├── repo_loader.py
+        │   └── supabase_vector.py
+        └── utils/
+            └── parser.py
+
+================================================
+FILE: ingest_test.py
+================================================
+from app.services.ingestion import ingest_repo
+
+result = ingest_repo("E:\AI Debugging Agent\sample_repo")  # ðŸ‘ˆ folder path
+
+print(result)
+
+
+================================================
+FILE: requirements.txt
+================================================
+fastapi
+uvicorn
+langchain
+langgraph
+langchain-google-genai
+faiss-cpu
+python-dotenv
+pydantic
+supabase
+python-multipart
+
+
+================================================
+FILE: test.py
+================================================
+from app.agents.retriever import retrieve_context
+
+print(retrieve_context("map error in javascript"))
+
+
+================================================
+FILE: uploaded_repo.zip
+================================================
+[Binary file]
+
+
+================================================
+FILE: app/main.py
+================================================
+from fastapi import FastAPI
+from app.api.routes import router 
+from app.api.upload import router as  upload_router
+
+
+app = FastAPI(title="AI Debugging Agent")
+
+app.include_router(router)
+app.include_router(upload_router)
+
+@app.get("/")
+def home():
+    return("Everthing is working...")
+
+
+
+
+================================================
+FILE: app/agents/error_analyzer.py
+================================================
+from langchain_google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    google_api_key=os.getenv("GOOGLE_API_KEY")
+)
+
+def analyze_error(error: str, code: str , context : str):
+    prompt = f"""
+        You are a debugging expert.
+
+        Use the provided context if relevant.
+
+        Context:
+        {context}
+
+        Error:
+        {error}
+
+        Code:
+        {code}
+
+        Return JSON:
+        {{
+          "root_cause": "...",
+          "explanation": "..."
+        }}
+        """
+
+    response = llm.invoke(prompt)
+
+    # âœ… Return only text
+    return response.content
+
+
+================================================
+FILE: app/agents/fix_generator.py
+================================================
+from langchain_google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    google_api_key=os.getenv("GOOGLE_API_KEY")
+)
+
+def generate_fix(error: str, code: str, analysis: str):
+    prompt = f"""
+    You are a senior software engineer.
+
+    Given the error and analysis below, generate a fix.
+
+    Error:
+    {error}
+
+    Code:
+    {code}
+
+    Analysis:
+    {analysis}
+
+    Return output STRICTLY in JSON format:
+
+    {{
+      "fix": "...",
+      "corrected_code": "...",
+      "explanation": "..."
+    }}
+    """
+
+    response = llm.invoke(prompt)
+
+    return response.content
+
+
+================================================
+FILE: app/agents/retriever.py
+================================================
+from app.services.embedding_service import embed_text
+from app.services.supabase_vector import search_similar 
+
+
+def retrieve_context(error: str, code: str, project_id: str):
+    query = error + "\n" + code
+
+    query_embedding = embed_text(query)
+
+    results = search_similar(query_embedding, project_id)
+
+    context = "\n".join([doc["content"] for doc in results])
+
+    return context
+
+
+================================================
+FILE: app/api/routes.py
+================================================
+from fastapi import APIRouter
+from pydantic import BaseModel
+from app.graph.workflow import build_graph
+from app.agents.error_analyzer import analyze_error
+
+router = APIRouter()
+
+# Build graph once
+graph = build_graph(analyze_error)
+
+
+class DebugRequest(BaseModel):
+    error: str
+    code: str
+
+
+@router.post("/debug")
+def debug_error(request: DebugRequest):
+    try:
+        result = graph.invoke({
+            "error": request.error,
+            "code": request.code
+        })
+
+        return {
+            "success": True,
+            "data": result
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+================================================
+FILE: app/api/upload.py
+================================================
+from fastapi import APIRouter, UploadFile, File
+import shutil
+import os
+import zipfile
+from app.services.ingestion import ingest_repo
+import  uuid
+
+router = APIRouter()
+
+UPLOAD_DIR = "../temp_repos"
+
+project_id = str(uuid.uuid4())
+
+@router.post("/upload")
+async def upload_repo(file: UploadFile = File(...)):
+    try:
+        # Clean old data
+        if os.path.exists(UPLOAD_DIR):
+            shutil.rmtree(UPLOAD_DIR)
+
+        # Save ZIP
+        zip_path = f"{UPLOAD_DIR}.zip"
+        with open(zip_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Extract ZIP
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(UPLOAD_DIR)
+
+        # Run ingestion
+        result = ingest_repo(UPLOAD_DIR, project_id)
+
+        return {
+            "success": True,
+            "data": result
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+================================================
+FILE: app/core/config.py
+================================================
+import  os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+
+================================================
+FILE: app/graph/workflow.py
+================================================
+from typing import TypedDict
+from langgraph.graph import StateGraph
+from app.agents.fix_generator import generate_fix
+from app.utils.parser import clean_json_response
+from app.agents.retriever import retrieve_context
+
+class DebugState(TypedDict):
+    error: str
+    code: str
+    context : str
+    analysis: str
+    fix: str
+
+
+def build_graph(analyze_fn):
+
+    graph = StateGraph(DebugState)
+
+    # ðŸ”¹ Analyze Node
+    def analyze_node(state: DebugState):
+        print("Incoming State:", state)
+        
+        context = state.get("context", "")
+        error = state.get("error", "")
+        code = state.get("code", "")
+
+        if not error or not code:
+            return {
+                "error": error,
+                "code": code,
+                "analysis": "Error or code not provided properly.",
+                "fix": ""
+            }
+
+        result = analyze_fn(error, code , context)
+
+        if hasattr(result, "content"):
+            analysis_text = result.content
+        else:
+            parsed_fix = clean_json_response(result)
+
+        return {
+            "error": error,
+            "code": code,
+            "analysis": parsed_fix,
+            "fix": ""
+        }
+        
+        print("CONTEXT:", context)
+        
+
+    # ðŸ”¹ Fix Node
+    def fix_node(state: DebugState):
+        print("Fix Node State:", state)
+
+        error = state.get("error", "")
+        code = state.get("code", "")
+        analysis = state.get("analysis", "")
+
+        if not analysis:
+            return {
+                **state,
+                "fix": "No analysis available to generate fix."
+            }
+
+        result = generate_fix(error, code, analysis)
+
+        if hasattr(result, "content"):
+            fix_text = result.content
+        else:
+            parsed_fix = clean_json_response(result)
+
+        return {
+            **state,
+            "fix": parsed_fix
+        }
+        
+    def retriever_node(state : DebugState):
+        error = state.get("error" , "")
+        
+        context = retrieve_context(error , code)
+        
+        return {
+            **state,
+            "context": context
+        }
+        
+
+
+    # Add nodes
+    graph.add_node("analyze", analyze_node)
+    graph.add_node("fix", fix_node)
+    graph.add_node("retrieve" , retriever_node)
+
+    # Flow
+    graph.set_entry_point("retrieve")
+    
+    graph.add_edge("retrieve", "analyze")
+    graph.add_edge("analyze", "fix")
+
+    return graph.compile()
+
+
+================================================
+FILE: app/services/chunker.py
+================================================
+def chunk_code(text: str, chunk_size=500, overlap=100):
+    chunks = []
+
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+
+        chunks.append(chunk)
+        start += chunk_size - overlap
+
+    return chunks
+
+
+================================================
+FILE: app/services/embedding_service.py
+================================================
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+embeddings = GoogleGenerativeAIEmbeddings(
+    model = "gemini-embedding-2-preview",
+    google_api_key = os.getenv("GOOGLE_API_KEY")
+)
+
+def embed_text(text:str):
+    return embeddings.embed_query(text)
+
+
+================================================
+FILE: app/services/ingestion.py
+================================================
+from app.services.repo_loader import load_repo_files
+from app.services.chunker import chunk_code
+from app.services.embedding_service import embed_text
+from app.services.supabase_vector import insert_document
+
+def ingest_repo(repo_path: str , project_id : str):
+    files = load_repo_files(repo_path)
+
+    total_chunks = 0
+
+    for file in files:
+        chunks = chunk_code(file["content"])
+
+        for chunk in chunks:
+            embedding = embed_text(chunk)
+
+            insert_document(chunk, embedding , project_id)
+
+            total_chunks += 1
+
+    return {
+        "files_processed": len(files),
+        "chunks_created": total_chunks
+    }
+
+
+================================================
+FILE: app/services/repo_loader.py
+================================================
+import os
+
+def load_repo_files(repo_path: str):
+    code_files = []
+
+    for root, _, files in os.walk(repo_path):
+        for file in files:
+            if file.endswith((".py", ".js", ".ts", ".jsx", ".tsx")):
+                full_path = os.path.join(root, file)
+
+                try:
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+
+                        code_files.append({
+                            "path": full_path,
+                            "content": content
+                        })
+                except Exception as e:
+                    print("Error reading file:", full_path, e)
+
+    return code_files
+
+
+================================================
+FILE: app/services/supabase_vector.py
+================================================
+from supabase import create_client
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+supabase = create_client(
+    os.getenv("SUPABASE_URL"),
+    os.getenv("SUPABASE_KEY")
+)
+
+def insert_document(content, embedding, project_id):
+    supabase.table("documents").insert({
+        "content": content,
+        "embedding": embedding,
+        "project_id": project_id
+    }).execute()
+    
+def search_similar(query_embedding, project_id):
+    return supabase.rpc("match_documents", {
+        "query_embedding": query_embedding,
+        "match_count": 3,
+        "project_filter": project_id
+    }).execute().data
+
+
+================================================
+FILE: app/utils/parser.py
+================================================
+import json
+import re
+
+def clean_json_response(text: str):
+    try:
+        # Remove ```json ``` wrapper
+        text = re.sub(r"```json|```", "", text).strip()
+
+        # Convert to JSON
+        return json.loads(text)
+
+    except Exception as e:
+        return {
+            "error": "Failed to parse JSON",
+            "raw_output": text
+        }
+
