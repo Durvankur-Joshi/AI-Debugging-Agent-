@@ -23,3 +23,7 @@ yarn-error.log*
 # Operating System files
 .DS_Store
 Thumbs.db
+
+temp_repos
+temp_repos.zip
+sample_repo.zip

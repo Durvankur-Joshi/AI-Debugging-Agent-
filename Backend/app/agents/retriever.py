@@ -1,14 +1,30 @@
 from app.services.embedding_service import embed_text
-from app.services.supabase_vector import search_similar 
+from app.services.supabase_vector import search_similar_documents
 
 
 def retrieve_context(error: str, code: str, project_id: str):
-    query = error + "\n" + code
 
-    query_embedding = embed_text(query)
+    query = f"""
+    Error:
+    {error}
 
-    results = search_similar(query_embedding, project_id)
+    Code:
+    {code}
+    """
 
-    context = "\n".join([doc["content"] for doc in results])
+    embedding = embed_text(query)
+
+    results = search_similar_documents(
+        embedding=embedding,
+        project_id=project_id
+    )
+
+    if not results:
+        return "No relevant context found."
+
+    context = "\n".join([
+        result["content"]
+        for result in results
+    ])
 
     return context

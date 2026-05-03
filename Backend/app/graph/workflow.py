@@ -1,101 +1,125 @@
 from typing import TypedDict
 from langgraph.graph import StateGraph
-from app.agents.fix_generator import generate_fix
-from app.utils.parser import clean_json_response
-from app.agents.retriever import retrieve_context
 
+from app.agents.fix_generator import generate_fix
+from app.agents.retriever import retrieve_context
+from app.utils.parser import clean_json_response
+
+
+# ✅ Graph State
 class DebugState(TypedDict):
     error: str
     code: str
-    context : str
-    analysis: str
-    fix: str
+    project_id: str
+    context: str
+    analysis: dict
+    fix: dict
 
 
 def build_graph(analyze_fn):
 
     graph = StateGraph(DebugState)
 
-    # 🔹 Analyze Node
-    def analyze_node(state: DebugState):
-        print("Incoming State:", state)
-        
-        context = state.get("context", "")
+    
+    def retriever_node(state: DebugState):
+
         error = state.get("error", "")
         code = state.get("code", "")
+        project_id = state.get("project_id", "")
+
+        context = retrieve_context(
+            error,
+            code,
+            project_id
+        )
+
+        print("Retrieved Context:", context)
+
+        return {
+            **state,
+            "context": context
+        }
+
+    
+    def analyze_node(state: DebugState):
+
+        print("Incoming State:", state)
+
+        error = state.get("error", "")
+        code = state.get("code", "")
+        context = state.get("context", "")
 
         if not error or not code:
             return {
-                "error": error,
-                "code": code,
-                "analysis": "Error or code not provided properly.",
-                "fix": ""
+                **state,
+                "analysis": {
+                    "error": "Error or code not provided properly."
+                }
             }
 
-        result = analyze_fn(error, code , context)
+        result = analyze_fn(
+            error,
+            code,
+            context
+        )
 
         if hasattr(result, "content"):
             analysis_text = result.content
         else:
-            parsed_fix = clean_json_response(result)
+            analysis_text = str(result)
+
+        parsed_analysis = clean_json_response(analysis_text)
 
         return {
-            "error": error,
-            "code": code,
-            "analysis": parsed_fix,
-            "fix": ""
+            **state,
+            "analysis": parsed_analysis
         }
-        
-        print("CONTEXT:", context)
-        
 
-    # 🔹 Fix Node
+    
     def fix_node(state: DebugState):
+
         print("Fix Node State:", state)
 
         error = state.get("error", "")
         code = state.get("code", "")
-        analysis = state.get("analysis", "")
+        analysis = state.get("analysis", {})
 
         if not analysis:
             return {
                 **state,
-                "fix": "No analysis available to generate fix."
+                "fix": {
+                    "error": "No analysis available."
+                }
             }
 
-        result = generate_fix(error, code, analysis)
+        result = generate_fix(
+            error,
+            code,
+            analysis
+        )
 
         if hasattr(result, "content"):
             fix_text = result.content
         else:
-            parsed_fix = clean_json_response(result)
+            fix_text = str(result)
+
+        parsed_fix = clean_json_response(fix_text)
 
         return {
             **state,
             "fix": parsed_fix
         }
-        
-    def retriever_node(state : DebugState):
-        error = state.get("error" , "")
-        
-        context = retrieve_context(error , code)
-        
-        return {
-            **state,
-            "context": context
-        }
-        
 
-
-    # Add nodes
+    
+    graph.add_node("retrieve", retriever_node)
     graph.add_node("analyze", analyze_node)
     graph.add_node("fix", fix_node)
-    graph.add_node("retrieve" , retriever_node)
 
-    # Flow
-    graph.set_entry_point("retrieve")
     
+    graph.set_entry_point("retrieve")
+
     graph.add_edge("retrieve", "analyze")
     graph.add_edge("analyze", "fix")
 
+    
     return graph.compile()

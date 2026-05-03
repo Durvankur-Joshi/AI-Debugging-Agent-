@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
+
 from app.graph.workflow import build_graph
 from app.agents.error_analyzer import analyze_error
 
@@ -12,14 +13,17 @@ graph = build_graph(analyze_error)
 class DebugRequest(BaseModel):
     error: str
     code: str
+    project_id: str   # ✅ NEW
 
 
 @router.post("/debug")
 def debug_error(request: DebugRequest):
     try:
+
         result = graph.invoke({
             "error": request.error,
-            "code": request.code
+            "code": request.code,
+            "project_id": request.project_id   # ✅ NEW
         })
 
         return {

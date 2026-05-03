@@ -16,9 +16,15 @@ def insert_document(content, embedding, project_id):
         "project_id": project_id
     }).execute()
     
-def search_similar(query_embedding, project_id):
-    return supabase.rpc("match_documents", {
-        "query_embedding": query_embedding,
-        "match_count": 3,
-        "project_filter": project_id
-    }).execute().data
+def search_similar_documents(embedding, project_id):
+
+    response = supabase.rpc(
+        "match_documents",
+        {
+            "query_embedding": embedding,
+            "match_count": 5,
+            "project_id_input": project_id
+        }
+    ).execute()
+
+    return response.data
