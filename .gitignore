@@ -24,6 +24,6 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 
-temp_repos
-temp_repos.zip
-sample_repo.zip
+/temp_repos
+/temp_repos.zip
+/sample_repo.zip
