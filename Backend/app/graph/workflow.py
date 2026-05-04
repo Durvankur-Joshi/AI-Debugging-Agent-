@@ -20,7 +20,9 @@ def build_graph(analyze_fn):
 
     graph = StateGraph(DebugState)
 
-    
+    # ==========================================
+    # 🔹 RETRIEVER NODE
+    # ==========================================
     def retriever_node(state: DebugState):
 
         error = state.get("error", "")
@@ -40,7 +42,9 @@ def build_graph(analyze_fn):
             "context": context
         }
 
-    
+    # ==========================================
+    # 🔹 ANALYZE NODE
+    # ==========================================
     def analyze_node(state: DebugState):
 
         print("Incoming State:", state)
@@ -75,7 +79,9 @@ def build_graph(analyze_fn):
             "analysis": parsed_analysis
         }
 
-    
+    # ==========================================
+    # 🔹 FIX NODE
+    # ==========================================
     def fix_node(state: DebugState):
 
         print("Fix Node State:", state)
@@ -110,16 +116,20 @@ def build_graph(analyze_fn):
             "fix": parsed_fix
         }
 
-    
+    # ==========================================
+    # 🔹 GRAPH NODES
+    # ==========================================
     graph.add_node("retrieve", retriever_node)
     graph.add_node("analyze", analyze_node)
     graph.add_node("fix", fix_node)
 
-    
+    # ==========================================
+    # 🔹 GRAPH FLOW
+    # ==========================================
     graph.set_entry_point("retrieve")
 
     graph.add_edge("retrieve", "analyze")
     graph.add_edge("analyze", "fix")
 
-    
+    # ==========================================
     return graph.compile()
