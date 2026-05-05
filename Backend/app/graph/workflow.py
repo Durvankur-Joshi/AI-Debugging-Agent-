@@ -4,6 +4,7 @@ from langgraph.graph import StateGraph
 from app.agents.fix_generator import generate_fix
 from app.agents.retriever import retrieve_context
 from app.utils.parser import clean_json_response
+from app.agents.validator import validate_fix
 
 
 # ✅ Graph State
@@ -14,6 +15,7 @@ class DebugState(TypedDict):
     context: str
     analysis: dict
     fix: dict
+    validation: dict
 
 
 def build_graph(analyze_fn):
@@ -115,6 +117,24 @@ def build_graph(analyze_fn):
             **state,
             "fix": parsed_fix
         }
+    
+    def validate_node(state:DebugState) :
+        print("Validation Node State" , state)
+        
+        error = state.get("error" , "")
+        code = state.get("code" , "")
+        fix = state.get("fix" , {})
+        
+        result = validate_fix(
+            error,
+            code,
+            fix
+        )
+        
+        return{
+            **state,
+            "validation":result
+        }
 
     # ==========================================
     # 🔹 GRAPH NODES
@@ -122,6 +142,7 @@ def build_graph(analyze_fn):
     graph.add_node("retrieve", retriever_node)
     graph.add_node("analyze", analyze_node)
     graph.add_node("fix", fix_node)
+    graph.add_node("validate" , validate_node)
 
     # ==========================================
     # 🔹 GRAPH FLOW
@@ -130,6 +151,7 @@ def build_graph(analyze_fn):
 
     graph.add_edge("retrieve", "analyze")
     graph.add_edge("analyze", "fix")
+    graph.add_edge("fix","validate")
 
     # ==========================================
     return graph.compile()
