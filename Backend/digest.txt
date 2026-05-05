@@ -3,13 +3,13 @@ Directory structure:
     ├── ingest_test.py
     ├── requirements.txt
     ├── test.py
-    ├── uploaded_repo.zip
     └── app/
         ├── main.py
         ├── agents/
         │   ├── error_analyzer.py
         │   ├── fix_generator.py
-        │   └── retriever.py
+        │   ├── retriever.py
+        │   └── validator.py
         ├── api/
         │   ├── routes.py
         │   └── upload.py
@@ -21,6 +21,7 @@ Directory structure:
         │   ├── chunker.py
         │   ├── embedding_service.py
         │   ├── ingestion.py
+        │   ├── llm_service.py
         │   ├── repo_loader.py
         │   └── supabase_vector.py
         └── utils/
@@ -57,12 +58,6 @@ FILE: test.py
 from app.agents.retriever import retrieve_context
 
 print(retrieve_context("map error in javascript"))
-
-
-================================================
-FILE: uploaded_repo.zip
-================================================
-[Binary file]
 
 
 ================================================
@@ -174,19 +169,81 @@ def generate_fix(error: str, code: str, analysis: str):
 FILE: app/agents/retriever.py
 ================================================
 from app.services.embedding_service import embed_text
-from app.services.supabase_vector import search_similar 
+from app.services.supabase_vector import search_similar_documents
 
 
 def retrieve_context(error: str, code: str, project_id: str):
-    query = error + "\n" + code
 
-    query_embedding = embed_text(query)
+    query = f"""
+    Error:
+    {error}
 
-    results = search_similar(query_embedding, project_id)
+    Code:
+    {code}
+    """
 
-    context = "\n".join([doc["content"] for doc in results])
+    embedding = embed_text(query)
+
+    results = search_similar_documents(
+        embedding=embedding,
+        project_id=project_id
+    )
+
+    if not results:
+        return "No relevant context found."
+
+    context = "\n".join([
+        result["content"]
+        for result in results
+    ])
 
     return context
+
+
+================================================
+FILE: app/agents/validator.py
+================================================
+from app.services.llm_service import llm
+from app.utils.parser import clean_json_response
+
+
+def validate_fix(error, code, fix):
+
+    prompt = f"""
+    You are a senior software engineer.
+
+    Your task is to validate whether the proposed fix correctly solves the error.
+
+    ERROR:
+    {error}
+
+    ORIGINAL CODE:
+    {code}
+
+    GENERATED FIX:
+    {fix}
+
+    Analyze carefully.
+
+    Return ONLY valid JSON:
+
+    {{
+      "valid": true,
+      "confidence": 95,
+      "feedback": "Short explanation about whether the fix is correct."
+    }}
+    """
+
+    response = llm.invoke(prompt)
+
+    if hasattr(response, "content"):
+        text = response.content
+    else:
+        text = str(response)
+
+    parsed = clean_json_response(text)
+
+    return parsed
 
 
 ================================================
@@ -194,6 +251,7 @@ FILE: app/api/routes.py
 ================================================
 from fastapi import APIRouter
 from pydantic import BaseModel
+
 from app.graph.workflow import build_graph
 from app.agents.error_analyzer import analyze_error
 
@@ -206,14 +264,17 @@ graph = build_graph(analyze_error)
 class DebugRequest(BaseModel):
     error: str
     code: str
+    project_id: str   # âœ… NEW
 
 
 @router.post("/debug")
 def debug_error(request: DebugRequest):
     try:
+
         result = graph.invoke({
             "error": request.error,
-            "code": request.code
+            "code": request.code,
+            "project_id": request.project_id   # âœ… NEW
         })
 
         return {
@@ -235,36 +296,42 @@ from fastapi import APIRouter, UploadFile, File
 import shutil
 import os
 import zipfile
+import uuid
+
 from app.services.ingestion import ingest_repo
-import  uuid
 
 router = APIRouter()
 
 UPLOAD_DIR = "../temp_repos"
 
-project_id = str(uuid.uuid4())
 
 @router.post("/upload")
 async def upload_repo(file: UploadFile = File(...)):
     try:
-        # Clean old data
+
+        # âœ… Generate UNIQUE project id PER upload
+        project_id = str(uuid.uuid4())
+
+        # âœ… Clean old temp folder
         if os.path.exists(UPLOAD_DIR):
             shutil.rmtree(UPLOAD_DIR)
 
-        # Save ZIP
+        # âœ… Save ZIP
         zip_path = f"{UPLOAD_DIR}.zip"
+
         with open(zip_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Extract ZIP
+        # âœ… Extract ZIP
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(UPLOAD_DIR)
 
-        # Run ingestion
+        # âœ… Ingest repo with project_id
         result = ingest_repo(UPLOAD_DIR, project_id)
 
         return {
             "success": True,
+            "project_id": project_id,
             "data": result
         }
 
@@ -291,104 +358,160 @@ FILE: app/graph/workflow.py
 ================================================
 from typing import TypedDict
 from langgraph.graph import StateGraph
-from app.agents.fix_generator import generate_fix
-from app.utils.parser import clean_json_response
-from app.agents.retriever import retrieve_context
 
+from app.agents.fix_generator import generate_fix
+from app.agents.retriever import retrieve_context
+from app.utils.parser import clean_json_response
+from app.agents.validator import validate_fix
+
+
+# âœ… Graph State
 class DebugState(TypedDict):
     error: str
     code: str
-    context : str
-    analysis: str
-    fix: str
+    project_id: str
+    context: str
+    analysis: dict
+    fix: dict
+    validation: dict
 
 
 def build_graph(analyze_fn):
 
     graph = StateGraph(DebugState)
 
-    # ðŸ”¹ Analyze Node
-    def analyze_node(state: DebugState):
-        print("Incoming State:", state)
-        
-        context = state.get("context", "")
+    # ==========================================
+    # ðŸ”¹ RETRIEVER NODE
+    # ==========================================
+    def retriever_node(state: DebugState):
+
         error = state.get("error", "")
         code = state.get("code", "")
+        project_id = state.get("project_id", "")
+
+        context = retrieve_context(
+            error,
+            code,
+            project_id
+        )
+
+        print("Retrieved Context:", context)
+
+        return {
+            **state,
+            "context": context
+        }
+
+    # ==========================================
+    # ðŸ”¹ ANALYZE NODE
+    # ==========================================
+    def analyze_node(state: DebugState):
+
+        print("Incoming State:", state)
+
+        error = state.get("error", "")
+        code = state.get("code", "")
+        context = state.get("context", "")
 
         if not error or not code:
             return {
-                "error": error,
-                "code": code,
-                "analysis": "Error or code not provided properly.",
-                "fix": ""
+                **state,
+                "analysis": {
+                    "error": "Error or code not provided properly."
+                }
             }
 
-        result = analyze_fn(error, code , context)
+        result = analyze_fn(
+            error,
+            code,
+            context
+        )
 
         if hasattr(result, "content"):
             analysis_text = result.content
         else:
-            parsed_fix = clean_json_response(result)
+            analysis_text = str(result)
+
+        parsed_analysis = clean_json_response(analysis_text)
 
         return {
-            "error": error,
-            "code": code,
-            "analysis": parsed_fix,
-            "fix": ""
+            **state,
+            "analysis": parsed_analysis
         }
-        
-        print("CONTEXT:", context)
-        
 
-    # ðŸ”¹ Fix Node
+    # ==========================================
+    # ðŸ”¹ FIX NODE
+    # ==========================================
     def fix_node(state: DebugState):
+
         print("Fix Node State:", state)
 
         error = state.get("error", "")
         code = state.get("code", "")
-        analysis = state.get("analysis", "")
+        analysis = state.get("analysis", {})
 
         if not analysis:
             return {
                 **state,
-                "fix": "No analysis available to generate fix."
+                "fix": {
+                    "error": "No analysis available."
+                }
             }
 
-        result = generate_fix(error, code, analysis)
+        result = generate_fix(
+            error,
+            code,
+            analysis
+        )
 
         if hasattr(result, "content"):
             fix_text = result.content
         else:
-            parsed_fix = clean_json_response(result)
+            fix_text = str(result)
+
+        parsed_fix = clean_json_response(fix_text)
 
         return {
             **state,
             "fix": parsed_fix
         }
+    
+    def validate_node(state:DebugState) :
+        print("Validation Node State" , state)
         
-    def retriever_node(state : DebugState):
         error = state.get("error" , "")
+        code = state.get("code" , "")
+        fix = state.get("fix" , {})
         
-        context = retrieve_context(error , code)
+        result = validate_fix(
+            error,
+            code,
+            fix
+        )
         
-        return {
+        return{
             **state,
-            "context": context
+            "validation":result
         }
-        
 
-
-    # Add nodes
+    # ==========================================
+    # ðŸ”¹ GRAPH NODES
+    # ==========================================
+    graph.add_node("retrieve", retriever_node)
     graph.add_node("analyze", analyze_node)
     graph.add_node("fix", fix_node)
-    graph.add_node("retrieve" , retriever_node)
+    graph.add_node("validate" , validate_node)
 
-    # Flow
+    # ==========================================
+    # ðŸ”¹ GRAPH FLOW
+    # ==========================================
     graph.set_entry_point("retrieve")
-    
+
     graph.add_edge("retrieve", "analyze")
     graph.add_edge("analyze", "fix")
+    graph.add_edge("fix","validate")
 
+    # ==========================================
     return graph.compile()
 
 
@@ -457,6 +580,22 @@ def ingest_repo(repo_path: str , project_id : str):
 
 
 ================================================
+FILE: app/services/llm_service.py
+================================================
+from langchain_google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash-lite",
+    google_api_key=os.getenv("GOOGLE_API_KEY"),
+    temperature=0.2
+)
+
+
+================================================
 FILE: app/services/repo_loader.py
 ================================================
 import os
@@ -504,12 +643,18 @@ def insert_document(content, embedding, project_id):
         "project_id": project_id
     }).execute()
     
-def search_similar(query_embedding, project_id):
-    return supabase.rpc("match_documents", {
-        "query_embedding": query_embedding,
-        "match_count": 3,
-        "project_filter": project_id
-    }).execute().data
+def search_similar_documents(embedding, project_id):
+
+    response = supabase.rpc(
+        "match_documents",
+        {
+            "query_embedding": embedding,
+            "match_count": 5,
+            "project_id_input": project_id
+        }
+    ).execute()
+
+    return response.data
 
 
 ================================================
